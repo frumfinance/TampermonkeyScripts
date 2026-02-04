@@ -66,22 +66,28 @@
         document.body.removeChild(link);
     };
 
-    const formatCurrency = amount =>
-        amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const formatCurrency = amount => {
+        if (amount === "N/A" || amount === null || amount === undefined) return "N/A";
+        
+        const num = typeof amount === 'number' ? amount : parseFloat(amount);
+        if (isNaN(num)) return "N/A";
+        
+        return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    };
 
     const stripCurrencySymbols = text => text.replace(/[₪$€£¥]/g, '');
 
-    const containsIgnoredKeyword = name =>
+    const containsIgnoredKeyword = name => 
         CONFIG.IGNORED_KEYWORDS.some(keyword => name.includes(keyword));
 
     const findCurrentBalance = inspector => {
         const items = [...inspector.querySelectorAll(CONFIG.SELECTORS.targetBreakdownItem)];
-        const balanceItem = items.find(item =>
+        const balanceItem = items.find(item => 
             item.querySelector('.target-breakdown-item-label')?.textContent.includes("Current Balance")
         );
-
+        
         if (!balanceItem) return 0;
-
+        
         const valueText = balanceItem.querySelector('.user-data.currency.tabular-nums')?.textContent;
         return valueText ? parseFloat(valueText.replace(/,/g, '')) : 0;
     };
@@ -106,7 +112,7 @@
 
         const behavior = inspector.querySelector(CONFIG.SELECTORS.targetBehavior)?.textContent.trim() || "N/A";
         const byDate = inspector.querySelector(CONFIG.SELECTORS.targetByDate)?.textContent.trim() || "";
-
+        
         return {
             rawDetails: `${behavior} ${byDate}`.trim(),
             currentBalance: findCurrentBalance(inspector)
@@ -130,7 +136,7 @@
 
     const parseTargetDetails = rawDetails => {
         const cleaned = stripCurrencySymbols(rawDetails);
-
+        
         return parseSetAsidePattern(cleaned) ||
                parseStandardPattern(cleaned) ||
                parseBalancePattern(cleaned) ||
@@ -197,13 +203,12 @@
             if (!this.currentGroup || containsIgnoredKeyword(name)) return;
 
             const categoryName = name.includes("Redact") ? "Redacted" : name;
-            const formattedAmount = formatCurrency(parseFloat(targetAmount));
 
             this.rows.push([
                 this.currentGroup,
                 categoryName,
                 targetType,
-                formattedAmount,
+                formatCurrency(targetAmount),
                 targetFrequency,
                 targetDueDate,
                 annualTotal,
@@ -247,7 +252,7 @@
 
     const processCategory = async (button, exporter) => {
         const categoryName = button.textContent.trim();
-
+        
         try {
             button.click();
             await new Promise(resolve => setTimeout(resolve, CONFIG.CATEGORY_LOAD_DELAY_MS));
