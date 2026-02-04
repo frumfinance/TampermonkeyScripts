@@ -195,7 +195,8 @@
             if (!this.currentGroup || containsIgnoredKeyword(name)) return;
 
             const categoryName = name.includes("Redact") ? "Redacted" : name;
-            const formattedAmount = formatCurrency(parseFloat(targetAmount));
+            const numericAmount = parseFloat(targetAmount);
+            const formattedAmount = Number.isFinite(numericAmount) ? formatCurrency(numericAmount) : "";
 
             this.rows.push([
                 this.currentGroup,
