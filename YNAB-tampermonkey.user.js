@@ -15,7 +15,7 @@
 
     const CONFIG = {
         TIMEOUT_MS: 10000,
-        CATEGORY_LOAD_DELAY_MS: 5,
+        CATEGORY_LOAD_DELAY_MS: 50,
         IGNORED_KEYWORDS: ['Credit Card', 'NoExport'],
         SELECTORS: {
             budgetRow: '.budget-table-row',
@@ -52,9 +52,11 @@
         });
     };
 
+    const escapeCSVCell = cell => String(cell).replace(/"/g, '""');
+
     const downloadCSV = (rows, filename) => {
         const csvContent = "data:text/csv;charset=utf-8," +
-            rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
+            rows.map(row => row.map(escapeCSVCell).map(cell => `"${cell}"`).join(",")).join("\n");
 
         const link = document.createElement("a");
         link.href = encodeURI(csvContent);
@@ -64,22 +66,22 @@
         document.body.removeChild(link);
     };
 
-    const formatCurrency = amount => 
+    const formatCurrency = amount =>
         amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     const stripCurrencySymbols = text => text.replace(/[₪$€£¥]/g, '');
 
-    const containsIgnoredKeyword = name => 
+    const containsIgnoredKeyword = name =>
         CONFIG.IGNORED_KEYWORDS.some(keyword => name.includes(keyword));
 
     const findCurrentBalance = inspector => {
         const items = [...inspector.querySelectorAll(CONFIG.SELECTORS.targetBreakdownItem)];
-        const balanceItem = items.find(item => 
+        const balanceItem = items.find(item =>
             item.querySelector('.target-breakdown-item-label')?.textContent.includes("Current Balance")
         );
-        
+
         if (!balanceItem) return 0;
-        
+
         const valueText = balanceItem.querySelector('.user-data.currency.tabular-nums')?.textContent;
         return valueText ? parseFloat(valueText.replace(/,/g, '')) : 0;
     };
@@ -104,7 +106,7 @@
 
         const behavior = inspector.querySelector(CONFIG.SELECTORS.targetBehavior)?.textContent.trim() || "N/A";
         const byDate = inspector.querySelector(CONFIG.SELECTORS.targetByDate)?.textContent.trim() || "";
-        
+
         return {
             rawDetails: `${behavior} ${byDate}`.trim(),
             currentBalance: findCurrentBalance(inspector)
@@ -128,7 +130,7 @@
 
     const parseTargetDetails = rawDetails => {
         const cleaned = stripCurrencySymbols(rawDetails);
-        
+
         return parseSetAsidePattern(cleaned) ||
                parseStandardPattern(cleaned) ||
                parseBalancePattern(cleaned) ||
@@ -195,8 +197,7 @@
             if (!this.currentGroup || containsIgnoredKeyword(name)) return;
 
             const categoryName = name.includes("Redact") ? "Redacted" : name;
-            const numericAmount = parseFloat(targetAmount);
-            const formattedAmount = Number.isFinite(numericAmount) ? formatCurrency(numericAmount) : "";
+            const formattedAmount = formatCurrency(parseFloat(targetAmount));
 
             this.rows.push([
                 this.currentGroup,
@@ -219,8 +220,8 @@
                 this.currentGroup,
                 "TOTAL",
                 "", "", "", "",
-                `=SUM(G${startRow}:G${endRow})`,
-                `=SUM(H${startRow}:H${endRow})`
+                `=SUMIF(G${startRow}:G${endRow},"<>N/A")`,
+                `=SUMIF(H${startRow}:H${endRow},"<>N/A")`
             ]);
         }
 
@@ -245,44 +246,56 @@
     }
 
     const processCategory = async (button, exporter) => {
-        button.click();
-        await new Promise(resolve => setTimeout(resolve, CONFIG.CATEGORY_LOAD_DELAY_MS));
+        const categoryName = button.textContent.trim();
 
-        const { rawDetails, currentBalance } = extractTargetDetails();
-        const [targetType, targetAmount, targetFrequency, targetDueDate] = parseTargetDetails(rawDetails);
-        const annualTotal = calculateAnnualTotal(targetAmount, targetFrequency, targetDueDate, currentBalance);
-        const averageSpent = extractAverageSpent();
+        try {
+            button.click();
+            await new Promise(resolve => setTimeout(resolve, CONFIG.CATEGORY_LOAD_DELAY_MS));
 
-        exporter.addCategory(
-            button.textContent.trim(),
-            targetType,
-            targetAmount,
-            targetFrequency,
-            targetDueDate,
-            annualTotal,
-            averageSpent
-        );
+            const { rawDetails, currentBalance } = extractTargetDetails();
+            const [targetType, targetAmount, targetFrequency, targetDueDate] = parseTargetDetails(rawDetails);
+            const annualTotal = calculateAnnualTotal(targetAmount, targetFrequency, targetDueDate, currentBalance);
+            const averageSpent = extractAverageSpent();
+
+            exporter.addCategory(
+                categoryName,
+                targetType,
+                targetAmount,
+                targetFrequency,
+                targetDueDate,
+                annualTotal,
+                averageSpent
+            );
+        } catch (error) {
+            throw new Error(`Failed processing category "${categoryName}": ${error.message}`);
+        }
     };
 
     const extractBudgetData = async () => {
-        const exporter = new CategoryExporter();
-        const rows = document.querySelectorAll(CONFIG.SELECTORS.budgetRow);
+        try {
+            const exporter = new CategoryExporter();
+            const rows = document.querySelectorAll(CONFIG.SELECTORS.budgetRow);
 
-        for (const row of rows) {
-            const button = row.querySelector(CONFIG.SELECTORS.categoryButton);
-            if (!button) continue;
+            for (const row of rows) {
+                const button = row.querySelector(CONFIG.SELECTORS.categoryButton);
+                if (!button) continue;
 
-            if (row.classList.contains(CONFIG.SELECTORS.masterCategory.slice(1))) {
-                exporter.startGroup(button.textContent.trim());
-            } else {
-                await processCategory(button, exporter);
+                if (row.classList.contains(CONFIG.SELECTORS.masterCategory.slice(1))) {
+                    exporter.startGroup(button.textContent.trim());
+                } else {
+                    await processCategory(button, exporter);
+                }
             }
+
+            exporter.addGrandTotal();
+
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            downloadCSV(exporter.getRows(), `ynab_categories_export_${timestamp}.csv`);
+        } catch (error) {
+            alert(`Export failed! Check console for details.\n\nError: ${error.message}`);
+            console.error('Export error:', error);
+            throw error;
         }
-
-        exporter.addGrandTotal();
-
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        downloadCSV(exporter.getRows(), `ynab_categories_export_${timestamp}.csv`);
     };
 
     const createExportButton = () => {
