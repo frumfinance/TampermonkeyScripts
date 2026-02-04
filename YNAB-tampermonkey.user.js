@@ -1,8 +1,8 @@
- // ==UserScript==
+// ==UserScript==
 // @name         frum.finance YNAB Enhancements
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  A collection of additional features from https://frum.finance
+// @version      2.1
+// @description  Export YNAB categories with annual totals and 6-month averages
 // @author       https://frum.finance
 // @downloadURL  https://github.com/frumfinance/YNABScripts/raw/refs/heads/main/YNAB-tampermonkey.user.js
 // @updateURL    https://github.com/frumfinance/YNABScripts/raw/refs/heads/main/YNAB-tampermonkey.user.js
@@ -13,218 +13,300 @@
 (function() {
     'use strict';
 
-    // Utility function to wait for a specific element to appear using MutationObserver
-    const waitForElement = (selector, timeout = 10000) => {
+    const CONFIG = {
+        TIMEOUT_MS: 10000,
+        CATEGORY_LOAD_DELAY_MS: 5,
+        IGNORED_KEYWORDS: ['Credit Card', 'NoExport'],
+        SELECTORS: {
+            budgetRow: '.budget-table-row',
+            masterCategory: '.is-master-category',
+            categoryButton: '.budget-table-cell-name button',
+            targetInspector: '.target-inspector',
+            targetBehavior: '.target-behavior',
+            targetByDate: '.target-by-date',
+            targetBreakdownItem: '.target-breakdown-item',
+            budgetToolbar: 'div.budget-table > div.budget-table-header > div.budget-toolbar',
+            averageSpentButton: '#tk-average-months'
+        }
+    };
+
+    const waitForElement = (selector, timeoutMs = CONFIG.TIMEOUT_MS) => {
         return new Promise((resolve, reject) => {
-            const observer = new MutationObserver((mutations, obs) => {
-                const element = document.querySelector(selector);
-                if (element) {
-                    obs.disconnect();
-                    resolve(element);
+            const element = document.querySelector(selector);
+            if (element) return resolve(element);
+
+            const observer = new MutationObserver(() => {
+                const found = document.querySelector(selector);
+                if (found) {
+                    observer.disconnect();
+                    resolve(found);
                 }
             });
 
-            observer.observe(document, {
-                childList: true,
-                subtree: true
-            });
+            observer.observe(document, { childList: true, subtree: true });
 
             setTimeout(() => {
                 observer.disconnect();
-                reject(new Error('Element not found: ' + selector));
-            }, timeout);
+                reject(new Error(`Element not found: ${selector}`));
+            }, timeoutMs);
         });
     };
 
-    // Function to export data to CSV
-    const exportToCSV = (rows) => {
-        const csvContent = "data:text/csv;charset=utf-8,"
-            + rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
+    const downloadCSV = (rows, filename) => {
+        const csvContent = "data:text/csv;charset=utf-8," +
+            rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
 
-        const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", `ynab_categories_export_${timestamp}.csv`);
+        link.href = encodeURI(csvContent);
+        link.download = filename;
         document.body.appendChild(link);
-
         link.click();
         document.body.removeChild(link);
     };
 
-    // Function to extract target details from the Target Inspector
-    const getTargetDetailsFromInspector = () => {
-        const targetInspector = document.querySelector('.target-inspector');
-        if (targetInspector) {
-            const targetBehavior = targetInspector.querySelector('.target-behavior')?.textContent.trim() || "N/A";
-            const targetByDate = targetInspector.querySelector('.target-by-date')?.textContent.trim() || "";
-            const currentBalanceElement = [...targetInspector.querySelectorAll('.target-breakdown-item')].find(item => item.querySelector('.target-breakdown-item-label')?.textContent.includes("Current Balance"));
-            const currentBalance = currentBalanceElement ? parseFloat(currentBalanceElement.querySelector('.target-breakdown-item-value .user-data.currency.tabular-nums').textContent.replace(/,/g, '')) : 0;
-            return { targetDetails: `${targetBehavior} ${targetByDate}`.trim(), currentBalance };
-        }
-        return { targetDetails: "N/A", currentBalance: 0 };
+    const formatCurrency = amount => 
+        amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    const stripCurrencySymbols = text => text.replace(/[₪$€£¥]/g, '');
+
+    const containsIgnoredKeyword = name => 
+        CONFIG.IGNORED_KEYWORDS.some(keyword => name.includes(keyword));
+
+    const findCurrentBalance = inspector => {
+        const items = [...inspector.querySelectorAll(CONFIG.SELECTORS.targetBreakdownItem)];
+        const balanceItem = items.find(item => 
+            item.querySelector('.target-breakdown-item-label')?.textContent.includes("Current Balance")
+        );
+        
+        if (!balanceItem) return 0;
+        
+        const valueText = balanceItem.querySelector('.user-data.currency.tabular-nums')?.textContent;
+        return valueText ? parseFloat(valueText.replace(/,/g, '')) : 0;
     };
 
-    // Function to split target details into separate parts
-    const parseTargetDetails = (targetDetails) => {
-        const match = targetDetails.match(/^([A-Za-z ]+?) (\d{1,3}(?:,\d{3})*(?:\.\d{2})?) (Each [A-Za-z]+)?(?: By (.+))?$/) ||
-                      targetDetails.match(/^Have a Balance of (\d{1,3}(?:,\d{3})*(?:\.\d{2})?) By (.+)$/);
-        if (match) {
-            if (targetDetails.startsWith("Have a Balance of")) {
-                return ["Have a Balance", match[1].replace(/,/g, ''), "N/A", match[2]];
-            }
-            return [match[1], match[2].replace(/,/g, ''), match[3] || "N/A", match[4] || "N/A"];
-        }
-        return ["N/A", "N/A", "N/A", "N/A"];
+    const extractAverageSpent = () => {
+        const button = document.querySelector(CONFIG.SELECTORS.averageSpentButton);
+        if (!button) return "N/A";
+
+        const currencySpan = button.querySelector('.user-data.currency');
+        if (!currencySpan) return "N/A";
+
+        const rawText = currencySpan.textContent.trim();
+        const cleaned = stripCurrencySymbols(rawText).replace(/,/g, '');
+        const parsed = parseFloat(cleaned);
+
+        return isNaN(parsed) ? "N/A" : formatCurrency(parsed);
     };
 
-    // Function to calculate the annual total for the goal
+    const extractTargetDetails = () => {
+        const inspector = document.querySelector(CONFIG.SELECTORS.targetInspector);
+        if (!inspector) return { rawDetails: "N/A", currentBalance: 0 };
+
+        const behavior = inspector.querySelector(CONFIG.SELECTORS.targetBehavior)?.textContent.trim() || "N/A";
+        const byDate = inspector.querySelector(CONFIG.SELECTORS.targetByDate)?.textContent.trim() || "";
+        
+        return {
+            rawDetails: `${behavior} ${byDate}`.trim(),
+            currentBalance: findCurrentBalance(inspector)
+        };
+    };
+
+    const parseSetAsidePattern = text => {
+        const match = text.match(/Set Aside Another\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(Each (?:Week|Month|Year))(?:\s+By\s+(.+))?/i);
+        return match ? ["Set Aside Another", match[1].replace(/,/g, ''), match[2], match[3] || "N/A"] : null;
+    };
+
+    const parseStandardPattern = text => {
+        const match = text.match(/^([A-Za-z ]+?)\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(Each (?:Week|Month|Year))(?:\s+By\s+(.+))?$/);
+        return match ? [match[1].trim(), match[2].replace(/,/g, ''), match[3], match[4] || "N/A"] : null;
+    };
+
+    const parseBalancePattern = text => {
+        const match = text.match(/Have a Balance of\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+By\s+(.+)/);
+        return match ? ["Have a Balance", match[1].replace(/,/g, ''), "N/A", match[2]] : null;
+    };
+
+    const parseTargetDetails = rawDetails => {
+        const cleaned = stripCurrencySymbols(rawDetails);
+        
+        return parseSetAsidePattern(cleaned) ||
+               parseStandardPattern(cleaned) ||
+               parseBalancePattern(cleaned) ||
+               ["N/A", "N/A", "N/A", "N/A"];
+    };
+
+    const calculateMonthlyFromDueDate = (targetAmount, dueDate, currentBalance) => {
+        const match = dueDate.match(/(\b\w+\b) (\d{4})/);
+        if (!match) return null;
+
+        const dueMonth = new Date(`${match[1]} 1, ${match[2]}`).getMonth();
+        const dueYear = parseInt(match[2], 10);
+        const now = new Date();
+        const monthsRemaining = (dueYear - now.getFullYear()) * 12 + (dueMonth - now.getMonth());
+
+        return monthsRemaining > 0 ? (targetAmount - currentBalance) / monthsRemaining : null;
+    };
+
     const calculateAnnualTotal = (amount, frequency, dueDate, currentBalance) => {
         const numericAmount = parseFloat(amount);
-        if (isNaN(numericAmount) || numericAmount <= 0) {
-            return "N/A";
+        if (isNaN(numericAmount) || numericAmount <= 0) return "N/A";
+
+        const frequencyMultipliers = {
+            'Each Week': 52,
+            'Each Month': 12,
+            'Each Year': 1
+        };
+
+        if (frequency in frequencyMultipliers) {
+            return formatCurrency(numericAmount * frequencyMultipliers[frequency]);
         }
-        switch (frequency) {
-            case 'Each Week':
-                return formatCurrency(numericAmount * 52);
-            case 'Each Month':
-                return formatCurrency(numericAmount * 12);
-            case 'Each Year':
-                return formatCurrency(numericAmount);
-            case 'N/A':
-                if (dueDate !== "N/A") {
-                    const currentDate = new Date();
-                    const dueDateMatch = dueDate.match(/(\b\w+\b) (\d{4})/);
-                    if (dueDateMatch) {
-                        const dueMonth = new Date(`${dueDateMatch[1]} 1, ${dueDateMatch[2]}`).getMonth();
-                        const dueYear = parseInt(dueDateMatch[2], 10);
-                        const monthsRemaining = (dueYear - currentDate.getFullYear()) * 12 + (dueMonth - currentDate.getMonth());
-                        if (monthsRemaining > 0) {
-                            return formatCurrency(((numericAmount - currentBalance) / monthsRemaining) * 12);
-                        }
-                    }
-                }
-                return "N/A";
-            default:
-                return "N/A";
+
+        if (frequency === 'N/A' && dueDate !== "N/A") {
+            const monthlyAmount = calculateMonthlyFromDueDate(numericAmount, dueDate, currentBalance);
+            return monthlyAmount ? formatCurrency(monthlyAmount * 12) : "N/A";
         }
+
+        return "N/A";
     };
 
-    // Utility function to format currency consistently
-    const formatCurrency = (amount) => {
-        return amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    };
-
-    // Function to add group total row
-    const addGroupTotalRow = (rows, currentGroupName, groupTotals) => {
-        if (currentGroupName !== "N/A" && groupTotals[currentGroupName]) {
-            rows.push([currentGroupName, "TOTAL", "", "", "", "", `=SUM(G${groupTotals[currentGroupName].startRow}:G${rows.length})`]);
+    class CategoryExporter {
+        constructor() {
+            this.rows = [
+                ["Category Group", "Category", "Target Type", "Target Amount", "Target Frequency", "Target Due Date", "Annual Total", "Avg Spent (6 Mo.)"],
+                ["https://frum.finance", "Donate: https://frum.finance/donate", "", "", "", "", "", ""]
+            ];
+            this.currentGroup = null;
+            this.groupStartRows = {};
         }
-    };
 
-    const shouldIgnore = (name) => {
-        return ["Credit Card", "NoExport"].some(ignore => name.includes(ignore))
+        startGroup(name) {
+            if (containsIgnoredKeyword(name)) {
+                this.currentGroup = null;
+                return;
+            }
+
+            this.finalizeCurrentGroup();
+            this.currentGroup = name;
+            this.rows.push([name, "", "", "", "", "", "", ""]);
+            this.groupStartRows[name] = this.rows.length + 1;
+        }
+
+        addCategory(name, targetType, targetAmount, targetFrequency, targetDueDate, annualTotal, averageSpent) {
+            if (!this.currentGroup || containsIgnoredKeyword(name)) return;
+
+            const categoryName = name.includes("Redact") ? "Redacted" : name;
+            const formattedAmount = formatCurrency(parseFloat(targetAmount));
+
+            this.rows.push([
+                this.currentGroup,
+                categoryName,
+                targetType,
+                formattedAmount,
+                targetFrequency,
+                targetDueDate,
+                annualTotal,
+                averageSpent
+            ]);
+        }
+
+        finalizeCurrentGroup() {
+            if (!this.currentGroup || !this.groupStartRows[this.currentGroup]) return;
+
+            const startRow = this.groupStartRows[this.currentGroup];
+            const endRow = this.rows.length;
+            this.rows.push([
+                this.currentGroup,
+                "TOTAL",
+                "", "", "", "",
+                `=SUM(G${startRow}:G${endRow})`,
+                `=SUM(H${startRow}:H${endRow})`
+            ]);
+        }
+
+        addGrandTotal() {
+            this.finalizeCurrentGroup();
+
+            const groupTotalRows = this.rows
+                .map((row, idx) => row[1] === "TOTAL" ? idx + 1 : null)
+                .filter(Boolean);
+
+            this.rows.push([
+                "GRAND TOTAL",
+                "", "", "", "", "",
+                `=SUM(${groupTotalRows.map(r => `G${r}`).join(",")})`,
+                `=SUM(${groupTotalRows.map(r => `H${r}`).join(",")})`
+            ]);
+        }
+
+        getRows() {
+            return this.rows;
+        }
     }
 
-    // Function to extract YNAB budget data
-    const extractData = async () => {
-        const exportRows = [["Category Group", "Category", "Target Type", "Target Amount", "Target Frequency", "Target Due Date", "Annual Total"],
-                      ["https://frum.finance", "Donate: https://frum.finance/donate", "", "", "", "", ""]];
-        let currentGroupName = "N/A";
-        const groups = document.querySelectorAll(".budget-table-row");
-        const groupTotals = {};
+    const processCategory = async (button, exporter) => {
+        button.click();
+        await new Promise(resolve => setTimeout(resolve, CONFIG.CATEGORY_LOAD_DELAY_MS));
 
-        for (const group of groups) {
-            const row = group.querySelector(".budget-table-cell-name button");
-            const rowName = row?.textContent.trim() || "N/A";
-            // If the row is a group header
-            if (group.classList.contains("is-master-category")) {
-                // Add the total for the previous group before starting a new one
-                addGroupTotalRow(exportRows, currentGroupName, groupTotals);
-                currentGroupName = rowName;
-                if (shouldIgnore(currentGroupName)) {
-                    currentGroupName = "N/A";
-                    continue; // Skip the "Credit Card Payments" group and its categories
-                }
-                exportRows.push([currentGroupName, "", "", "", "", "", ""]); // Add group header
-                groupTotals[currentGroupName] = { startRow: exportRows.length + 1, total: 0 };
-            } 
-            // Else, the row is a specific category within the group
-            else {
-                const categoryName = rowName.includes("Redact") ? "Redacted" : rowName;
-                if (currentGroupName === "N/A" || shouldIgnore(categoryName)) {
-                    continue;
-                }
+        const { rawDetails, currentBalance } = extractTargetDetails();
+        const [targetType, targetAmount, targetFrequency, targetDueDate] = parseTargetDetails(rawDetails);
+        const annualTotal = calculateAnnualTotal(targetAmount, targetFrequency, targetDueDate, currentBalance);
+        const averageSpent = extractAverageSpent();
 
-                // Click the category to populate the target inspector
-                row?.click();
+        exporter.addCategory(
+            button.textContent.trim(),
+            targetType,
+            targetAmount,
+            targetFrequency,
+            targetDueDate,
+            annualTotal,
+            averageSpent
+        );
+    };
 
-                // Wait for the target inspector to load
-                await new Promise(resolve => setTimeout(resolve, 5)); // Reduced delay for better performance
+    const extractBudgetData = async () => {
+        const exporter = new CategoryExporter();
+        const rows = document.querySelectorAll(CONFIG.SELECTORS.budgetRow);
 
-                // Extract target details from the inspector
-                const { targetDetails, currentBalance } = getTargetDetailsFromInspector();
-                const [targetType, targetAmount, targetFrequency, targetDueDate] = parseTargetDetails(targetDetails);
-                const annualTotal = calculateAnnualTotal(targetAmount, targetFrequency, targetDueDate, currentBalance);
+        for (const row of rows) {
+            const button = row.querySelector(CONFIG.SELECTORS.categoryButton);
+            if (!button) continue;
 
-                // Enhanced logging to debug the extraction process
-                console.log(`Group: '${currentGroupName}', Category: '${categoryName}', Target Details:`, {
-                    targetDetails,
-                    targetType,
-                    targetAmount,
-                    targetFrequency,
-                    targetDueDate,
-                    annualTotal,
-                    currentBalance,
-                });
-
-                // Add data to exportRows, ensuring category group is correctly captured
-                exportRows.push([currentGroupName, categoryName, targetType, formatCurrency(parseFloat(targetAmount)), targetFrequency, targetDueDate, annualTotal]);
+            if (row.classList.contains(CONFIG.SELECTORS.masterCategory.slice(1))) {
+                exporter.startGroup(button.textContent.trim());
+            } else {
+                await processCategory(button, exporter);
             }
         }
 
-        // Add the total for the last group
-        addGroupTotalRow(exportRows, currentGroupName, groupTotals);
+        exporter.addGrandTotal();
 
-        // Get exportRows with group totals for overall total calculation
-        const groupTotalRows = exportRows.reduce((acc, row, index) => {
-            if (row[1] === "TOTAL") acc.push(`G${index + 1}`);
-            return acc;
-        }, []);
-        exportRows.push(["GRAND TOTAL", "", "", "", "", "", `=SUM(${groupTotalRows.join(",")})`]);
-
-        exportToCSV(exportRows);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        downloadCSV(exporter.getRows(), `ynab_categories_export_${timestamp}.csv`);
     };
 
-    // Function to add a button to the page for CSV export
-    const addExportButton = () => {
-        const existingButton = document.getElementById('ynab-export-button');
-        if (existingButton) return; // Avoid adding multiple buttons
+    const createExportButton = () => {
+        if (document.getElementById('ynab-export-button')) return;
 
         const button = document.createElement('button');
         button.id = 'ynab-export-button';
-        button.innerText = "Export Categories to CSV";
-        button.style.padding = "10px 15px";
-        button.style.backgroundColor = "#0079c1";
-        button.style.color = "white";
-        button.style.border = "none";
-        button.style.borderRadius = "5px";
-        button.style.cursor = "pointer";
-        button.style.marginLeft = "10px"; // Added left padding
-        button.onclick = () => {
-            extractData();
-        };
+        button.textContent = "Export Categories to CSV";
+        Object.assign(button.style, {
+            padding: "10px 15px",
+            backgroundColor: "#0079c1",
+            color: "white",
+            border: "none",
+            borderRadius: "5px",
+            cursor: "pointer",
+            marginLeft: "10px"
+        });
+        button.onclick = extractBudgetData;
 
-        // Add button to the budget toolbar instead of fixed position
-        waitForElement("div.budget-table > div.budget-table-header > div.budget-toolbar")
-            .then(toolbar => {
-                toolbar.appendChild(button);
-            })
-            .catch(err => console.error("Error adding button to toolbar:", err));
+        waitForElement(CONFIG.SELECTORS.budgetToolbar)
+            .then(toolbar => toolbar.appendChild(button))
+            .catch(err => console.error("Failed to add export button:", err));
     };
 
-    // Wait for the YNAB page content to load, then add the export button
-    waitForElement(".budget-table-row.is-master-category")
-        .then(() => addExportButton())
-        .catch(err => console.error("Error:", err));
+    waitForElement(`${CONFIG.SELECTORS.budgetRow}${CONFIG.SELECTORS.masterCategory}`)
+        .then(createExportButton)
+        .catch(err => console.error("Failed to initialize:", err));
 })();
