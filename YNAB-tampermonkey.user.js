@@ -39,12 +39,10 @@
     // Function to export data to CSV
     const exportToCSV = (rows) => {
         const csvContent = "data:text/csv;charset=utf-8,"
-            + rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n");
-
-        const encodedUri = encodeURI(csvContent);
+            + encodeURIComponent(rows.map(row => row.map(cell => `"${cell}"`).join(",")).join("\n"));
         const link = document.createElement("a");
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        link.setAttribute("href", encodedUri);
+        link.setAttribute("href", csvContent);
         link.setAttribute("download", `ynab_categories_export_${timestamp}.csv`);
         document.body.appendChild(link);
 
