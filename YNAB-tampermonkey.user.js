@@ -16,6 +16,7 @@
     const CONFIG = {
         TIMEOUT_MS: 10000,
         CATEGORY_LOAD_DELAY_MS: 50,
+        UPDATE_TIMEOUT_MS: 1000,
         IGNORED_KEYWORDS: ['Credit Card', 'NoExport'],
         REDACTION_KEYWORD: 'Redact',
         REDACTION_LABEL: 'Redacted',
@@ -51,6 +52,33 @@
                 observer.disconnect();
                 reject(new Error(`Element not found: ${selector}`));
             }, timeoutMs);
+        });
+    };
+
+    // The average widget is refreshed asynchronously by an external script
+    // after each selection change; reading it on a fixed timer risks stale
+    // data. Wait for its update to settle. On timeout (no mutation, e.g. an
+    // unchanged value re-render) the current text is already correct and is
+    // read as-is; an update arriving after the timeout is a documented
+    // residual of the external script's unknown update timing.
+    const waitForContentUpdate = (element, settleMs = CONFIG.CATEGORY_LOAD_DELAY_MS, timeoutMs = CONFIG.UPDATE_TIMEOUT_MS) => {
+        return new Promise(resolve => {
+            let settleTimer = null;
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                observer.disconnect();
+                clearTimeout(timeoutTimer);
+                clearTimeout(settleTimer);
+                resolve();
+            };
+            const observer = new MutationObserver(() => {
+                clearTimeout(settleTimer);
+                settleTimer = setTimeout(finish, settleMs);
+            });
+            observer.observe(element, { childList: true, subtree: true, characterData: true });
+            const timeoutTimer = setTimeout(finish, timeoutMs);
         });
     };
 
@@ -261,8 +289,12 @@
         const categoryName = button.textContent.trim();
         
         try {
+            const averageWidget = document.querySelector(CONFIG.SELECTORS.averageSpentButton);
+            const averageWidgetUpdate = averageWidget ? waitForContentUpdate(averageWidget) : null;
+
             button.click();
             await new Promise(resolve => setTimeout(resolve, CONFIG.CATEGORY_LOAD_DELAY_MS));
+            if (averageWidgetUpdate) await averageWidgetUpdate;
 
             const { rawDetails, currentBalance } = extractTargetDetails();
             const [targetType, targetAmount, targetFrequency, targetDueDate] = parseTargetDetails(rawDetails);
