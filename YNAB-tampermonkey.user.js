@@ -155,7 +155,11 @@
 
     const parseSetAsidePattern = text => {
         const match = text.match(/Set Aside Another\s+(\d+(?:,\d{3})*(?:\.\d{2})?)\s+(Each (?:Week|Month|Year))(?:\s+By\s+(.+))?/i);
-        return match ? ["Set Aside Another", match[1].replace(/,/g, ''), match[2], match[3] || "N/A"] : null;
+        if (!match) return null;
+        // The /i match accepts any UI casing; downstream lookups are
+        // case-sensitive, so normalize to their Title-Case keys.
+        const frequency = match[2].toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+        return ["Set Aside Another", match[1].replace(/,/g, ''), frequency, match[3] || "N/A"];
     };
 
     const parseStandardPattern = text => {
