@@ -56,29 +56,36 @@
     };
 
     // The average widget is refreshed asynchronously by an external script
-    // after each selection change; reading it on a fixed timer risks stale
-    // data. Wait for its update to settle. On timeout (no mutation, e.g. an
-    // unchanged value re-render) the current text is already correct and is
-    // read as-is; an update arriving after the timeout is a documented
-    // residual of the external script's unknown update timing.
-    const waitForContentUpdate = (element, settleMs = CONFIG.CATEGORY_LOAD_DELAY_MS, timeoutMs = CONFIG.UPDATE_TIMEOUT_MS) => {
+    // with an unknown update protocol, and an update may still be in flight
+    // when the next category is processed. Draining waits out any pending
+    // update before a click; accepting waits for the click's own update
+    // signal (a mutation followed by a quiet window) and reports false when
+    // none arrives, in which case the value cannot be bound to the new
+    // selection and is reported "N/A" rather than risk stale data from a
+    // previous one. Residual: an update that mutates in bursts spaced
+    // beyond the quiet window can still be misattributed; that ambiguity is
+    // inherent to the external script's unknown protocol.
+    const waitForWidgetSettle = (element, { requireSignal = false, quietMs = CONFIG.CATEGORY_LOAD_DELAY_MS, timeoutMs = CONFIG.UPDATE_TIMEOUT_MS } = {}) => {
         return new Promise(resolve => {
-            let settleTimer = null;
             let done = false;
-            const finish = () => {
+            let quietTimer = null;
+            const finish = result => {
                 if (done) return;
                 done = true;
                 observer.disconnect();
                 clearTimeout(timeoutTimer);
-                clearTimeout(settleTimer);
-                resolve();
+                clearTimeout(quietTimer);
+                resolve(result);
             };
             const observer = new MutationObserver(() => {
-                clearTimeout(settleTimer);
-                settleTimer = setTimeout(finish, settleMs);
+                clearTimeout(quietTimer);
+                quietTimer = setTimeout(() => finish(true), quietMs);
             });
             observer.observe(element, { childList: true, subtree: true, characterData: true });
-            const timeoutTimer = setTimeout(finish, timeoutMs);
+            if (!requireSignal) {
+                quietTimer = setTimeout(() => finish(false), quietMs);
+            }
+            const timeoutTimer = setTimeout(() => finish(false), timeoutMs);
         });
     };
 
@@ -294,16 +301,20 @@
         
         try {
             const averageWidget = document.querySelector(CONFIG.SELECTORS.averageSpentButton);
-            const averageWidgetUpdate = averageWidget ? waitForContentUpdate(averageWidget) : null;
+            if (averageWidget) await waitForWidgetSettle(averageWidget);
+
+            const averageWidgetUpdate = averageWidget
+                ? waitForWidgetSettle(averageWidget, { requireSignal: true })
+                : Promise.resolve(false);
 
             button.click();
             await new Promise(resolve => setTimeout(resolve, CONFIG.CATEGORY_LOAD_DELAY_MS));
-            if (averageWidgetUpdate) await averageWidgetUpdate;
+            const averageWidgetUpdated = await averageWidgetUpdate;
 
             const { rawDetails, currentBalance } = extractTargetDetails();
             const [targetType, targetAmount, targetFrequency, targetDueDate] = parseTargetDetails(rawDetails);
             const annualTotal = calculateAnnualTotal(targetAmount, targetFrequency, targetDueDate, currentBalance);
-            const averageSpent = extractAverageSpent();
+            const averageSpent = averageWidgetUpdated ? extractAverageSpent() : "N/A";
 
             exporter.addCategory(
                 categoryName,
