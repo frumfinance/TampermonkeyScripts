@@ -17,6 +17,8 @@
         TIMEOUT_MS: 10000,
         CATEGORY_LOAD_DELAY_MS: 50,
         IGNORED_KEYWORDS: ['Credit Card', 'NoExport'],
+        REDACTION_KEYWORD: 'Redact',
+        REDACTION_LABEL: 'Redacted',
         SELECTORS: {
             budgetRow: '.budget-table-row',
             masterCategory: '.is-master-category',
@@ -204,7 +206,7 @@
         addCategory(name, targetType, targetAmount, targetFrequency, targetDueDate, annualTotal, averageSpent) {
             if (!this.currentGroup || containsIgnoredKeyword(name)) return;
 
-            const categoryName = name.includes("Redact") ? "Redacted" : name;
+            const categoryName = name.includes(CONFIG.REDACTION_KEYWORD) ? CONFIG.REDACTION_LABEL : name;
 
             this.rows.push([
                 this.currentGroup,
