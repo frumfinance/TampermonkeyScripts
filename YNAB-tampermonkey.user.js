@@ -194,12 +194,13 @@
         }
 
         startGroup(name) {
+            this.finalizeCurrentGroup();
+
             if (containsIgnoredKeyword(name)) {
                 this.currentGroup = null;
                 return;
             }
 
-            this.finalizeCurrentGroup();
             this.currentGroup = name;
             this.rows.push([name, "", "", "", "", "", "", ""]);
             this.groupStartRows[name] = this.rows.length + 1;
