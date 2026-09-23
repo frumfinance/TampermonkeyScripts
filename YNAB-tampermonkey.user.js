@@ -287,7 +287,7 @@
                 const button = row.querySelector(CONFIG.SELECTORS.categoryButton);
                 if (!button) continue;
 
-                if (row.classList.contains(CONFIG.SELECTORS.masterCategory.slice(1))) {
+                if (row.matches(CONFIG.SELECTORS.masterCategory)) {
                     exporter.startGroup(button.textContent.trim());
                 } else {
                     await processCategory(button, exporter);
