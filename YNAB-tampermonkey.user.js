@@ -55,11 +55,13 @@
     const escapeCSVCell = cell => String(cell).replace(/"/g, '""');
 
     const downloadCSV = (rows, filename) => {
+        // encodeURIComponent (not encodeURI) so '#' in a cell cannot start a
+        // data-URI fragment and silently truncate the export.
         const csvContent = "data:text/csv;charset=utf-8," +
-            rows.map(row => row.map(escapeCSVCell).map(cell => `"${cell}"`).join(",")).join("\n");
+            encodeURIComponent(rows.map(row => row.map(escapeCSVCell).map(cell => `"${cell}"`).join(",")).join("\n"));
 
         const link = document.createElement("a");
-        link.href = encodeURI(csvContent);
+        link.href = csvContent;
         link.download = filename;
         document.body.appendChild(link);
         link.click();
