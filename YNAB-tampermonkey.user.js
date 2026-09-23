@@ -76,7 +76,9 @@
         const num = typeof amount === 'number' ? amount : parseFloat(amount);
         if (isNaN(num)) return "N/A";
         
-        return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        // Plain decimal (no locale grouping) so spreadsheet apps parse the
+        // cell as a number and the embedded SUMIF formulas can sum it.
+        return num.toFixed(2);
     };
 
     const stripCurrencySymbols = text => text.replace(/[₪$€£¥]/g, '');
